@@ -72,6 +72,7 @@ app.post('/webhook', async (req, res) => {
 
   // Ignorar mensajes del propio bot
   if (msg.from.is_bot) return;
+  console.log('Chat ID recibido:', chatId);
 
   const parsed = parsearMensaje(texto);
 
