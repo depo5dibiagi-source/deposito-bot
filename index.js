@@ -39,20 +39,19 @@ function fechaHoy() {
 }
 
 function parsearMensaje(texto) {
-  // Acepta: GP-F23 OC79120135 o OC79120135 GP-F23 (cualquier orden)
   const partes = texto.trim().toUpperCase().split(/\s+/);
-  if (partes.length < 2) return null;
-
   let fila = null;
   let oc   = null;
 
   for (const p of partes) {
     if (/^(CG|GP|CC)-F\d+$/.test(p)) fila = p;
     else if (/^OC\d+(-\d+)?$/.test(p)) oc = p;
-    else if (/^\d{7,8}(-\d+)?$/.test(p)) oc = `OC${p}`; // sin prefijo OC
+    else if (/^\d{7,8}(-\d+)?$/.test(p)) oc = `OC${p}`;
   }
 
-  return fila && oc ? { fila, oc } : null;
+  if (fila && oc) return { tipo: 'guardar', fila, oc };
+  if (oc && !fila) return { tipo: 'consultar', oc };
+  return null;
 }
 
 // ── WEBHOOK ──
@@ -76,13 +75,47 @@ app.post('/webhook', async (req, res) => {
   const parsed = parsearMensaje(texto);
 
   if (!parsed) {
-    // Solo responder si parece que intentaron usar el bot
     const pareceIntento = /OC|F-\d|GP|CG|CC/i.test(texto);
     if (pareceIntento) {
       await enviarMensaje(chatId,
-        `❓ <b>Formato incorrecto</b>\nEscribí: <code>FILA OC</code>\nEjemplo: <code>GP-F23 OC79120135</code>`
+        `❓ <b>Formato incorrecto</b>\n` +
+        `Para guardar ubicación: <code>GP-F23 OC79120135</code>\n` +
+        `Para consultar dónde está: <code>OC79120135</code>`
       );
     }
+    return;
+  }
+
+  // ── CONSULTA: solo OC, sin fila ──
+  if (parsed.tipo === 'consultar') {
+    const ocBase = parsed.oc.replace(/^OC/i, '').split('-')[0];
+    const todosSnap = await db.collection('mp').get();
+    const docs = todosSnap.docs.filter(d => {
+      const data = d.data();
+      return (data.oc === ocBase || data.oc === 'OC' + ocBase) && !data.fe;
+    });
+
+    if (docs.length === 0) {
+      await enviarMensaje(chatId, `❓ <b>${parsed.oc}</b> no encontrada en el sistema.`);
+      return;
+    }
+
+    // Agrupar por fila
+    const filas = {};
+    docs.forEach(d => {
+      const f = d.data().fila || 'Sin asignar';
+      filas[f] = (filas[f] || 0) + 1;
+    });
+
+    const dato = docs[0].data();
+    const nom = dato.nom && dato.nom !== '-' ? dato.nom : '';
+    let respuesta = `📦 <b>${parsed.oc}</b>${nom ? ' — ' + nom : ''}\n`;
+    Object.entries(filas).forEach(([f, cant]) => {
+      respuesta += `📍 ${f}: ${cant} lote(s)\n`;
+    });
+    respuesta += `Total: ${docs.length} lote(s) activo(s)`;
+
+    await enviarMensaje(chatId, respuesta);
     return;
   }
 
@@ -103,19 +136,19 @@ app.post('/webhook', async (req, res) => {
     console.log('Buscando OC:', ocBase, '| Fila:', fila, '| Usuario:', nombre);
 
     // Buscar por campo 'oc' (como lo guarda la app)
-   const todosSnap = await db.collection('mp').get();
-console.log('Total documentos en mp:', todosSnap.size);
+    let snap = await db.collection('mp')
+      .where('oc', '==', ocBase)
+      .get();
 
-const snap = { 
-  empty: false,
-  docs: todosSnap.docs.filter(d => {
-    const data = d.data();
-    return data.oc === ocBase || data.oc === 'OC' + ocBase;
-  })
-};
+    console.log('Resultado query:', snap.size, 'documentos');
 
-console.log('Documentos encontrados para OC', ocBase, ':', snap.docs.length);
-if (snap.docs.length === 0) snap.empty = true;
+    // Si no encontró, intentar con el prefijo OC incluido
+    if (snap.empty) {
+      snap = await db.collection('mp')
+        .where('oc', '==', 'OC' + ocBase)
+        .get();
+      console.log('Resultado query con OC prefix:', snap.size, 'documentos');
+    }
 
     // Filtrar solo los activos (sin fecha de egreso)
     const activos = snap.empty ? [] : snap.docs.filter(d => {
