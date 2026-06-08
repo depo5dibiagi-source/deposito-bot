@@ -103,19 +103,19 @@ app.post('/webhook', async (req, res) => {
     console.log('Buscando OC:', ocBase, '| Fila:', fila, '| Usuario:', nombre);
 
     // Buscar por campo 'oc' (como lo guarda la app)
-    let snap = await db.collection('mp')
-      .where('oc', '==', ocBase)
-      .get();
+   const todosSnap = await db.collection('mp').get();
+console.log('Total documentos en mp:', todosSnap.size);
 
-    console.log('Resultado query:', snap.size, 'documentos');
+const snap = { 
+  empty: false,
+  docs: todosSnap.docs.filter(d => {
+    const data = d.data();
+    return data.oc === ocBase || data.oc === 'OC' + ocBase;
+  })
+};
 
-    // Si no encontró, intentar con el prefijo OC incluido
-    if (snap.empty) {
-      snap = await db.collection('mp')
-        .where('oc', '==', 'OC' + ocBase)
-        .get();
-      console.log('Resultado query con OC prefix:', snap.size, 'documentos');
-    }
+console.log('Documentos encontrados para OC', ocBase, ':', snap.docs.length);
+if (snap.docs.length === 0) snap.empty = true;
 
     // Filtrar solo los activos (sin fecha de egreso)
     const activos = snap.empty ? [] : snap.docs.filter(d => {
