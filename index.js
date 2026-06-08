@@ -96,57 +96,52 @@ app.post('/webhook', async (req, res) => {
     return;
   }
 
-  // Buscar el lote en Firebase (colección mp)
-  // Buscar por OC (campo oc) o por cod completo
+  // Buscar lotes en Firebase por número de OC
+  // Actualiza TODOS los lotes activos de esa OC con la nueva fila
   try {
-    const ocBase = oc.replace(/^OC/, '').split('-')[0]; // número de OC sin sublote
-    const cod    = oc.includes('-') ? oc.split('-').slice(1).join('-') : null;
+    const ocBase = oc.replace(/^OC/i, '').split('-')[0];
 
-    let snap = null;
+    // Buscar por campo 'oc' (como lo guarda la app)
+    let snap = await db.collection('mp')
+      .where('oc', '==', ocBase)
+      .get();
 
-    if (cod) {
-      // Buscar por OC + codigo
+    // Si no encontró, intentar con el prefijo OC incluido
+    if (snap.empty) {
       snap = await db.collection('mp')
-        .where('oc', '==', ocBase)
-        .where('cod', '==', cod)
-        .where('fe', '==', null)  // activo (sin fecha de egreso)
-        .limit(1).get();
-
-      // Si no encontró con fe==null, buscar sin ese filtro
-      if (snap.empty) {
-        snap = await db.collection('mp')
-          .where('oc', '==', ocBase)
-          .where('cod', '==', cod)
-          .limit(1).get();
-      }
+        .where('oc', '==', 'OC' + ocBase)
+        .get();
     }
 
-    if (!snap || snap.empty) {
-      // Buscar solo por OC
-      snap = await db.collection('mp')
-        .where('oc', '==', ocBase)
-        .limit(1).get();
-    }
+    // Filtrar solo los activos (sin fecha de egreso)
+    const activos = snap.empty ? [] : snap.docs.filter(d => {
+      const fe = d.data().fe;
+      return !fe || fe === '' || fe === null;
+    });
 
-    if (snap && !snap.empty) {
-      // Actualizar fila en el documento
-      const docRef = snap.docs[0].ref;
-      await docRef.update({
-        fila: fila,
-        fila_actualizada_por: nombre,
-        fila_fecha: new Date().toISOString()
+    if (activos.length > 0) {
+      // Actualizar fila en TODOS los lotes activos de la OC
+      const batch = db.batch();
+      activos.forEach(doc => {
+        batch.update(doc.ref, {
+          fila: fila,
+          fila_actualizada_por: nombre,
+          fila_fecha: new Date().toISOString()
+        });
       });
+      await batch.commit();
 
-      const dato = snap.docs[0].data();
+      const dato = activos[0].data();
       const loteNombre = dato.nom || dato.oc || oc;
 
       await enviarMensaje(chatId,
-        `✅ <b>${oc}</b> registrada en <b>${fila}</b>\n` +
+        `✅ <b>${oc}</b> → <b>${fila}</b>\n` +
         `📦 ${loteNombre}\n` +
+        `📊 ${activos.length} lote(s) actualizados\n` +
         `👤 ${nombre} — ${fechaHoy()}`
       );
     } else {
-      // Lote no encontrado — igual guardar el registro
+      // Lote no encontrado — guardar igual en colección aparte
       await db.collection('ubicaciones_bot').add({
         oc: oc,
         fila: fila,
@@ -156,8 +151,8 @@ app.post('/webhook', async (req, res) => {
       });
 
       await enviarMensaje(chatId,
-        `⚠️ <b>${oc}</b> guardada en <b>${fila}</b>\n` +
-        `(El lote no está en el sistema, pero quedó registrado)\n` +
+        `⚠️ <b>${oc}</b> → <b>${fila}</b> guardado\n` +
+        `(OC no encontrada en el sistema)\n` +
         `👤 ${nombre} — ${fechaHoy()}`
       );
     }
