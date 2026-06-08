@@ -68,7 +68,7 @@ app.post('/webhook', async (req, res) => {
   const nombre = msg.from.first_name || 'Operario';
 
   // Solo escuchar el grupo configurado
-  if (String(chatId) !== String(CHAT_ID)) return;
+  // if (String(chatId) !== String(CHAT_ID)) return;
 
   // Ignorar mensajes del propio bot
   if (msg.from.is_bot) return;
