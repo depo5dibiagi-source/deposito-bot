@@ -68,11 +68,10 @@ app.post('/webhook', async (req, res) => {
   const nombre = msg.from.first_name || 'Operario';
 
   // Solo escuchar el grupo configurado
-  // if (String(chatId) !== String(CHAT_ID)) return;
+  if (String(chatId) !== String(CHAT_ID)) return;
 
   // Ignorar mensajes del propio bot
   if (msg.from.is_bot) return;
-  console.log('Chat ID recibido:', chatId);
 
   const parsed = parsearMensaje(texto);
 
@@ -101,17 +100,21 @@ app.post('/webhook', async (req, res) => {
   // Actualiza TODOS los lotes activos de esa OC con la nueva fila
   try {
     const ocBase = oc.replace(/^OC/i, '').split('-')[0];
+    console.log('Buscando OC:', ocBase, '| Fila:', fila, '| Usuario:', nombre);
 
     // Buscar por campo 'oc' (como lo guarda la app)
     let snap = await db.collection('mp')
       .where('oc', '==', ocBase)
       .get();
 
+    console.log('Resultado query:', snap.size, 'documentos');
+
     // Si no encontró, intentar con el prefijo OC incluido
     if (snap.empty) {
       snap = await db.collection('mp')
         .where('oc', '==', 'OC' + ocBase)
         .get();
+      console.log('Resultado query con OC prefix:', snap.size, 'documentos');
     }
 
     // Filtrar solo los activos (sin fecha de egreso)
