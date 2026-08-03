@@ -38,6 +38,21 @@ function fechaHoy() {
   });
 }
 
+// ── NORMALIZAR ARTÍCULO Y LOTE ──
+// Artículo: sacar prefijo 901 si tiene más de 7 dígitos
+function normArticulo(art) {
+  if (art.startsWith('901') && art.length > 7) return art.slice(3);
+  return art;
+}
+// Lote: puede venir con ceros adelante (000035911088) o sin (35911088)
+// Buscar ambas versiones
+function normLotes(lote) {
+  const sinCeros = lote.replace(/^0+/, '') || lote;
+  const conCeros = lote.padStart(12, '0');
+  const set = new Set([lote, sinCeros, conCeros]);
+  return [...set];
+}
+
 // ── PARSEAR MENSAJE ──
 // Formatos soportados:
 //   MP:  GP-F23 OC79120135          → asigna fila a OC de MP
@@ -171,12 +186,18 @@ app.post('/webhook', async (req, res) => {
   // PT — CONSULTA (art + lote)
   // ════════════════════════════
   if (parsed.tipo === 'pt_consultar') {
-    const snap = await db.collection('pt_lotes')
-      .where('articulo', '==', parsed.articulo)
-      .where('lote', '==', parsed.lote)
-      .get();
+    const artNorm = normArticulo(parsed.articulo);
+    const lotesVariantes = normLotes(parsed.lote);
+    let snap = { empty: true, docs: [] };
+    for (const lv of lotesVariantes) {
+      const s = await db.collection('pt_lotes')
+        .where('articulo', '==', artNorm)
+        .where('lote', '==', lv)
+        .get();
+      if (!s.empty) { snap = s; break; }
+    }
     if (snap.empty) {
-      await enviarMensaje(chatId, `❓ Art <b>${parsed.articulo}</b> lote <b>${parsed.lote}</b> no encontrado.`); return;
+      await enviarMensaje(chatId, `❓ Art <b>${artNorm}</b> lote <b>${parsed.lote}</b> no encontrado.`); return;
     }
     const data = snap.docs[0].data();
     const fila = data.fila || 'Sin asignar';
@@ -198,14 +219,21 @@ app.post('/webhook', async (req, res) => {
   if (parsed.tipo === 'pt_guardar') {
     try {
       // 1. Buscar el lote específico para obtener el remito
-      const snapLote = await db.collection('pt_lotes')
-        .where('articulo', '==', parsed.articulo)
-        .where('lote', '==', parsed.lote)
-        .get();
+      const artNorm = normArticulo(parsed.articulo);
+
+      const lotesVariantes = normLotes(parsed.lote);
+      let snapLote = { empty: true, docs: [] };
+      for (const lv of lotesVariantes) {
+        const s = await db.collection('pt_lotes')
+          .where('articulo', '==', artNorm)
+          .where('lote', '==', lv)
+          .get();
+        if (!s.empty) { snapLote = s; break; }
+      }
 
       if (snapLote.empty) {
         await enviarMensaje(chatId,
-          `❓ Art <b>${parsed.articulo}</b> lote <b>${parsed.lote}</b> no encontrado en PT.`
+          `❓ Art <b>${artNorm}</b> lote <b>${parsed.lote}</b> no encontrado en PT.`
         );
         return;
       }
@@ -217,7 +245,7 @@ app.post('/webhook', async (req, res) => {
         // Sin remito: actualizar solo ese lote
         await snapLote.docs[0].ref.update({ fila: parsed.fila, fila_actualizada_por: nombre, fila_fecha: new Date().toISOString() });
         await enviarMensaje(chatId,
-          `✅ <b>Art: ${parsed.articulo}</b> lote <b>${parsed.lote}</b> → <b>${parsed.fila}</b>\n` +
+          `✅ <b>Art: ${artNorm}</b> lote <b>${parsed.lote}</b> → <b>${parsed.fila}</b>\n` +
           `(Sin remito asociado, solo este lote actualizado)\n` +
           `👤 ${nombre} — ${fechaHoy()}`
         );
@@ -226,7 +254,7 @@ app.post('/webhook', async (req, res) => {
 
       // 2. Buscar todos los lotes del mismo artículo con ese remito
       const snapRemito = await db.collection('pt_lotes')
-        .where('articulo', '==', parsed.articulo)
+        .where('articulo', '==', artNorm)
         .where('remito', '==', remito)
         .get();
 
@@ -234,7 +262,7 @@ app.post('/webhook', async (req, res) => {
       const activos = snapRemito.docs.filter(d => !d.data().fe);
 
       if (!activos.length) {
-        await enviarMensaje(chatId, `❓ No hay lotes activos del art <b>${parsed.articulo}</b> con remito <b>${remito}</b>.`);
+        await enviarMensaje(chatId, `❓ No hay lotes activos del art <b>${artNorm}</b> con remito <b>${remito}</b>.`);
         return;
       }
 
@@ -244,7 +272,7 @@ app.post('/webhook', async (req, res) => {
       await batch.commit();
 
       await enviarMensaje(chatId,
-        `✅ <b>Art: ${parsed.articulo}</b> → <b>${parsed.fila}</b>\n` +
+        `✅ <b>Art: ${artNorm}</b> → <b>${parsed.fila}</b>\n` +
         `📋 Remito: ${remito}\n` +
         `📊 ${activos.length} lote(s) del mismo remito actualizados\n` +
         `👤 ${nombre} — ${fechaHoy()}`
