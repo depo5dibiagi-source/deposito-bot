@@ -60,29 +60,41 @@ function normLotes(lote) {
 //   Consulta MP:  OC79120135
 //   Consulta PT:  5041038 35907013  (sin fila)
 function parsearMensaje(texto) {
-  const partes = texto.trim().split(/\s+/);
+  // Limpiar: quitar caracteres raros, normalizar espacios
+  const limpio = texto.trim().replace(/[^\w\s-]/g, ' ').replace(/\s+/g, ' ');
+  const partes = limpio.split(' ').filter(p => p.length > 0);
+
   let fila = null;
   const resto = [];
 
   for (const p of partes) {
-    if (/^(CG|GP|CC)-F\d+$/i.test(p)) fila = p.toUpperCase();
-    else resto.push(p);
+    // Fila: CG-F17, GP-F23, CC-F5 (con o sin guion, flexible)
+    const filaMatch = p.toUpperCase().match(/^(CG|GP|CC)-?F(\d+)$/);
+    if (filaMatch) {
+      fila = filaMatch[1] + '-F' + filaMatch[2];
+    } else {
+      resto.push(p);
+    }
   }
 
+  console.log('Parser: fila=' + fila + ' resto=' + JSON.stringify(resto));
+
   // ¿Tiene OC? → es MP
-  const ocPart = resto.find(p => /^OC\d+/i.test(p) || /^\d{7,8}(-\d+)?$/.test(p) && resto.length === 1);
-  if (ocPart && /^OC\d+/i.test(ocPart)) {
+  const ocPart = resto.find(p => /^OC\d+/i.test(p));
+  if (ocPart) {
     return { tipo: fila ? 'mp_guardar' : 'mp_consultar', fila, oc: ocPart.toUpperCase().replace(/^OC/,'') };
   }
 
-  // ¿Tiene 2 números? → es PT (artículo + lote)
+  // Solo números → PT (art + lote) o MP (OC sin prefijo)
   const nums = resto.filter(p => /^\d+$/.test(p));
+
   if (nums.length >= 2) {
+    // 2 números → PT: artículo + lote
     return { tipo: fila ? 'pt_guardar' : 'pt_consultar', fila, articulo: nums[0], lote: nums[1] };
   }
 
-  // Solo un número largo → puede ser OC de MP sin prefijo
   if (nums.length === 1 && nums[0].length >= 7) {
+    // 1 número largo → OC de MP sin prefijo
     return { tipo: fila ? 'mp_guardar' : 'mp_consultar', fila, oc: nums[0] };
   }
 
