@@ -6,9 +6,9 @@ const app = express();
 app.use(express.json());
 
 // ── CONFIG ──
-const TOKEN    = process.env.TELEGRAM_TOKEN;
-const CHAT_ID  = process.env.TELEGRAM_CHAT_ID;
-const API_URL  = `https://api.telegram.org/bot${TOKEN}`;
+const TOKEN   = process.env.TELEGRAM_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const API_URL = `https://api.telegram.org/bot${TOKEN}`;
 
 // ── FIREBASE ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
@@ -17,9 +17,9 @@ const db = admin.firestore();
 
 // ── FILAS VÁLIDAS ──
 const filasValidas = new Set();
-for (let i = 1; i <= 32; i++) filasValidas.add(`CG-F${i}`);
-for (let i = 1; i <= 97; i++) filasValidas.add(`GP-F${i}`);
-for (let i = 1; i <= 28; i++) filasValidas.add(`CC-F${i}`);
+for (let i = 1; i <= 100; i++) filasValidas.add(`CG-F${i}`);  // Cámara Grande hasta F100
+for (let i = 1; i <= 97;  i++) filasValidas.add(`GP-F${i}`);
+for (let i = 1; i <= 28;  i++) filasValidas.add(`CC-F${i}`);
 
 // ── HELPERS ──
 function enviarMensaje(chatId, texto) {
@@ -38,25 +38,45 @@ function fechaHoy() {
   });
 }
 
+// ── PARSEAR MENSAJE ──
+// Formatos soportados:
+//   MP:  GP-F23 OC79120135          → asigna fila a OC de MP
+//   PT:  GP-F23 5041038 35907013    → asigna fila a art+lote PT, y todos los del mismo remito
+//   Consulta MP:  OC79120135
+//   Consulta PT:  5041038 35907013  (sin fila)
 function parsearMensaje(texto) {
-  const partes = texto.trim().toUpperCase().split(/\s+/);
+  const partes = texto.trim().split(/\s+/);
   let fila = null;
-  let oc   = null;
+  const resto = [];
 
   for (const p of partes) {
-    if (/^(CG|GP|CC)-F\d+$/.test(p)) fila = p;
-    else if (/^OC\d+(-\d+)?$/.test(p)) oc = p;
-    else if (/^\d{7,8}(-\d+)?$/.test(p)) oc = `OC${p}`;
+    if (/^(CG|GP|CC)-F\d+$/i.test(p)) fila = p.toUpperCase();
+    else resto.push(p);
   }
 
-  if (fila && oc) return { tipo: 'guardar', fila, oc };
-  if (oc && !fila) return { tipo: 'consultar', oc };
+  // ¿Tiene OC? → es MP
+  const ocPart = resto.find(p => /^OC\d+/i.test(p) || /^\d{7,8}(-\d+)?$/.test(p) && resto.length === 1);
+  if (ocPart && /^OC\d+/i.test(ocPart)) {
+    return { tipo: fila ? 'mp_guardar' : 'mp_consultar', fila, oc: ocPart.toUpperCase().replace(/^OC/,'') };
+  }
+
+  // ¿Tiene 2 números? → es PT (artículo + lote)
+  const nums = resto.filter(p => /^\d+$/.test(p));
+  if (nums.length >= 2) {
+    return { tipo: fila ? 'pt_guardar' : 'pt_consultar', fila, articulo: nums[0], lote: nums[1] };
+  }
+
+  // Solo un número largo → puede ser OC de MP sin prefijo
+  if (nums.length === 1 && nums[0].length >= 7) {
+    return { tipo: fila ? 'mp_guardar' : 'mp_consultar', fila, oc: nums[0] };
+  }
+
   return null;
 }
 
 // ── WEBHOOK ──
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // responder rápido a Telegram
+  res.sendStatus(200);
 
   const update = req.body;
   if (!update.message) return;
@@ -66,138 +86,175 @@ app.post('/webhook', async (req, res) => {
   const texto  = msg.text || '';
   const nombre = msg.from.first_name || 'Operario';
 
-  // Solo escuchar el grupo configurado
   if (String(chatId) !== String(CHAT_ID)) return;
-
-  // Ignorar mensajes del propio bot
   if (msg.from.is_bot) return;
 
   const parsed = parsearMensaje(texto);
 
   if (!parsed) {
-    const pareceIntento = /OC|F-\d|GP|CG|CC/i.test(texto);
+    const pareceIntento = /OC|F-\d|GP|CG|CC|\d{7}/i.test(texto);
     if (pareceIntento) {
       await enviarMensaje(chatId,
-        `❓ <b>Formato incorrecto</b>\n` +
-        `Para guardar ubicación: <code>GP-F23 OC79120135</code>\n` +
-        `Para consultar dónde está: <code>OC79120135</code>`
+        `❓ <b>Formato incorrecto</b>\n\n` +
+        `<b>MP:</b> <code>GP-F23 OC79120135</code>\n` +
+        `<b>PT:</b> <code>GP-F23 5041038 35907013</code>\n` +
+        `  (fila · artículo · lote)\n\n` +
+        `<b>Consultar MP:</b> <code>OC79120135</code>\n` +
+        `<b>Consultar PT:</b> <code>5041038 35907013</code>`
       );
     }
     return;
   }
 
-  // ── CONSULTA: solo OC, sin fila ──
-  if (parsed.tipo === 'consultar') {
-    const ocBase = parsed.oc.replace(/^OC/i, '').split('-')[0];
-    const todosSnap = await db.collection('mp').get();
-    const docs = todosSnap.docs.filter(d => {
-      const data = d.data();
-      return (data.oc === ocBase || data.oc === 'OC' + ocBase) && !data.fe;
-    });
-
-    if (docs.length === 0) {
-      await enviarMensaje(chatId, `❓ <b>${parsed.oc}</b> no encontrada en el sistema.`);
-      return;
-    }
-
-    // Agrupar por fila
-    const filas = {};
-    docs.forEach(d => {
-      const f = d.data().fila || 'Sin asignar';
-      filas[f] = (filas[f] || 0) + 1;
-    });
-
-    const dato = docs[0].data();
-    const nom = dato.nom && dato.nom !== '-' ? dato.nom : '';
-    let respuesta = `📦 <b>${parsed.oc}</b>${nom ? ' — ' + nom : ''}\n`;
-    Object.entries(filas).forEach(([f, cant]) => {
-      respuesta += `📍 ${f}: ${cant} lote(s)\n`;
-    });
-    respuesta += `Total: ${docs.length} lote(s) activo(s)`;
-
-    await enviarMensaje(chatId, respuesta);
-    return;
-  }
-
-  const { fila, oc } = parsed;
-
-  // Validar fila
-  if (!filasValidas.has(fila)) {
+  // Validar fila si corresponde
+  if (parsed.fila && !filasValidas.has(parsed.fila)) {
     await enviarMensaje(chatId,
-      `❌ <b>${fila}</b> no es una fila válida.\nUsá: CG-F1 a CG-F32, GP-F1 a GP-F97, CC-F1 a CC-F28`
+      `❌ <b>${parsed.fila}</b> no es una fila válida.\n` +
+      `CG-F1 a CG-F100 · GP-F1 a GP-F97 · CC-F1 a CC-F28`
     );
     return;
   }
 
-  // Buscar lotes en Firebase por número de OC
-  // Actualiza TODOS los lotes activos de esa OC con la nueva fila
-  try {
-    const ocBase = oc.replace(/^OC/i, '').split('-')[0];
-    console.log('Buscando OC:', ocBase, '| Fila:', fila, '| Usuario:', nombre);
-
-    // Buscar por campo 'oc' (como lo guarda la app)
-    let snap = await db.collection('mp')
-      .where('oc', '==', ocBase)
-      .get();
-
-    console.log('Resultado query:', snap.size, 'documentos');
-
-    // Si no encontró, intentar con el prefijo OC incluido
-    if (snap.empty) {
-      snap = await db.collection('mp')
-        .where('oc', '==', 'OC' + ocBase)
-        .get();
-      console.log('Resultado query con OC prefix:', snap.size, 'documentos');
-    }
-
-    // Filtrar solo los activos (sin fecha de egreso)
-    const activos = snap.empty ? [] : snap.docs.filter(d => {
-      const fe = d.data().fe;
-      return !fe || fe === '' || fe === null;
+  // ════════════════════════════
+  // MP — CONSULTA
+  // ════════════════════════════
+  if (parsed.tipo === 'mp_consultar') {
+    const snap = await db.collection('mp').get();
+    const docs = snap.docs.filter(d => {
+      const data = d.data();
+      return (data.oc === parsed.oc || data.oc === 'OC' + parsed.oc) && !data.fe;
     });
+    if (!docs.length) {
+      await enviarMensaje(chatId, `❓ OC <b>${parsed.oc}</b> no encontrada.`); return;
+    }
+    const filas = {};
+    docs.forEach(d => { const f = d.data().fila || 'Sin asignar'; filas[f] = (filas[f]||0)+1; });
+    let resp = `📦 <b>OC${parsed.oc}</b> — ${docs[0].data().nom||''}\n`;
+    Object.entries(filas).forEach(([f,c]) => resp += `📍 ${f}: ${c} lote(s)\n`);
+    resp += `Total: ${docs.length} lote(s) activo(s)`;
+    await enviarMensaje(chatId, resp);
+    return;
+  }
 
-    if (activos.length > 0) {
-      // Actualizar fila en TODOS los lotes activos de la OC
-      const batch = db.batch();
-      activos.forEach(doc => {
-        batch.update(doc.ref, {
-          fila: fila,
-          fila_actualizada_por: nombre,
-          fila_fecha: new Date().toISOString()
-        });
+  // ════════════════════════════
+  // MP — GUARDAR FILA
+  // ════════════════════════════
+  if (parsed.tipo === 'mp_guardar') {
+    try {
+      const snap = await db.collection('mp').get();
+      const activos = snap.docs.filter(d => {
+        const data = d.data();
+        return (data.oc === parsed.oc || data.oc === 'OC' + parsed.oc) && (!data.fe || data.fe === '');
       });
+      if (activos.length > 0) {
+        const batch = db.batch();
+        activos.forEach(doc => batch.update(doc.ref, { fila: parsed.fila, fila_actualizada_por: nombre, fila_fecha: new Date().toISOString() }));
+        await batch.commit();
+        await enviarMensaje(chatId,
+          `✅ <b>OC${parsed.oc}</b> → <b>${parsed.fila}</b>\n` +
+          `📦 ${activos[0].data().nom || ''}\n` +
+          `📊 ${activos.length} lote(s) actualizados\n` +
+          `👤 ${nombre} — ${fechaHoy()}`
+        );
+      } else {
+        await db.collection('ubicaciones_bot').add({ oc: parsed.oc, fila: parsed.fila, operario: nombre, fecha: new Date().toISOString() });
+        await enviarMensaje(chatId, `⚠️ OC${parsed.oc} → ${parsed.fila} guardado (OC no encontrada en sistema)\n👤 ${nombre}`);
+      }
+    } catch (err) {
+      console.error(err);
+      await enviarMensaje(chatId, `⚠️ Error al guardar. Intentá de nuevo.`);
+    }
+    return;
+  }
+
+  // ════════════════════════════
+  // PT — CONSULTA (art + lote)
+  // ════════════════════════════
+  if (parsed.tipo === 'pt_consultar') {
+    const snap = await db.collection('pt_lotes')
+      .where('articulo', '==', parsed.articulo)
+      .where('lote', '==', parsed.lote)
+      .get();
+    if (snap.empty) {
+      await enviarMensaje(chatId, `❓ Art <b>${parsed.articulo}</b> lote <b>${parsed.lote}</b> no encontrado.`); return;
+    }
+    const data = snap.docs[0].data();
+    const fila = data.fila || 'Sin asignar';
+    const saldo = data.bultos || 0;
+    await enviarMensaje(chatId,
+      `📦 <b>Art: ${parsed.articulo}</b>\n` +
+      `🏷 Lote: ${parsed.lote}\n` +
+      `📍 Ubicación: <b>${fila}</b>\n` +
+      `📊 Bultos en stock: ${saldo}`
+    );
+    return;
+  }
+
+  // ════════════════════════════
+  // PT — GUARDAR FILA
+  // Busca el lote → obtiene el remito → actualiza todos los lotes
+  // del mismo artículo con ese remito
+  // ════════════════════════════
+  if (parsed.tipo === 'pt_guardar') {
+    try {
+      // 1. Buscar el lote específico para obtener el remito
+      const snapLote = await db.collection('pt_lotes')
+        .where('articulo', '==', parsed.articulo)
+        .where('lote', '==', parsed.lote)
+        .get();
+
+      if (snapLote.empty) {
+        await enviarMensaje(chatId,
+          `❓ Art <b>${parsed.articulo}</b> lote <b>${parsed.lote}</b> no encontrado en PT.`
+        );
+        return;
+      }
+
+      const loteData = snapLote.docs[0].data();
+      const remito   = loteData.remito || null;
+
+      if (!remito) {
+        // Sin remito: actualizar solo ese lote
+        await snapLote.docs[0].ref.update({ fila: parsed.fila, fila_actualizada_por: nombre, fila_fecha: new Date().toISOString() });
+        await enviarMensaje(chatId,
+          `✅ <b>Art: ${parsed.articulo}</b> lote <b>${parsed.lote}</b> → <b>${parsed.fila}</b>\n` +
+          `(Sin remito asociado, solo este lote actualizado)\n` +
+          `👤 ${nombre} — ${fechaHoy()}`
+        );
+        return;
+      }
+
+      // 2. Buscar todos los lotes del mismo artículo con ese remito
+      const snapRemito = await db.collection('pt_lotes')
+        .where('articulo', '==', parsed.articulo)
+        .where('remito', '==', remito)
+        .get();
+
+      // Filtrar los que no tienen egreso total
+      const activos = snapRemito.docs.filter(d => !d.data().fe);
+
+      if (!activos.length) {
+        await enviarMensaje(chatId, `❓ No hay lotes activos del art <b>${parsed.articulo}</b> con remito <b>${remito}</b>.`);
+        return;
+      }
+
+      // 3. Actualizar todos
+      const batch = db.batch();
+      activos.forEach(doc => batch.update(doc.ref, { fila: parsed.fila, fila_actualizada_por: nombre, fila_fecha: new Date().toISOString() }));
       await batch.commit();
 
-      const dato = activos[0].data();
-      const loteNombre = dato.nom || dato.oc || oc;
-
       await enviarMensaje(chatId,
-        `✅ <b>${oc}</b> → <b>${fila}</b>\n` +
-        `📦 ${loteNombre}\n` +
-        `📊 ${activos.length} lote(s) actualizados\n` +
+        `✅ <b>Art: ${parsed.articulo}</b> → <b>${parsed.fila}</b>\n` +
+        `📋 Remito: ${remito}\n` +
+        `📊 ${activos.length} lote(s) del mismo remito actualizados\n` +
         `👤 ${nombre} — ${fechaHoy()}`
       );
-    } else {
-      // Lote no encontrado — guardar igual en colección aparte
-      await db.collection('ubicaciones_bot').add({
-        oc: oc,
-        fila: fila,
-        operario: nombre,
-        fecha: new Date().toISOString(),
-        encontrado_en_mp: false
-      });
 
-      await enviarMensaje(chatId,
-        `⚠️ <b>${oc}</b> → <b>${fila}</b> guardado\n` +
-        `(OC no encontrada en el sistema)\n` +
-        `👤 ${nombre} — ${fechaHoy()}`
-      );
+    } catch (err) {
+      console.error(err);
+      await enviarMensaje(chatId, `⚠️ Error al guardar. Intentá de nuevo.`);
     }
-  } catch (err) {
-    console.error('Error Firebase:', err.message);
-    await enviarMensaje(chatId,
-      `⚠️ Error al guardar. Intentá de nuevo.`
-    );
+    return;
   }
 });
 
