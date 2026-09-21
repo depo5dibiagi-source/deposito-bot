@@ -1,6 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json());
@@ -11,18 +10,13 @@ const CHAT_ID  = process.env.TELEGRAM_CHAT_ID;          // chat/grupo autorizado
 const API_URL  = `https://api.telegram.org/bot${TOKEN}`;
 const FILE_URL = `https://api.telegram.org/file/bot${TOKEN}`;
 
-const GMAIL_USER = process.env.GMAIL_USER;               // depo5dibiagi@gmail.com
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD; // contraseña de aplicación (16 caracteres)
-const DEST_EMAIL = process.env.DEST_EMAIL || GMAIL_USER;  // a dónde llega (por defecto, la misma cuenta)
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
-});
+// Envío de mail por HTTP (Resend) — evita el bloqueo de SMTP saliente de Render free.
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const RESEND_FROM = process.env.RESEND_FROM || 'onboarding@resend.dev'; // dominio de prueba de Resend
+const DEST_EMAIL = process.env.DEST_EMAIL; // depo5dibiagi@gmail.com
 
 // Guarda el último texto mandado por chat, por si el operario manda
 // primero el texto (asunto) y después la(s) foto(s) sueltas.
-// Se descarta solo (TTL) para no mezclar cargas viejas con fotos nuevas.
 const ultimoTextoPorChat = new Map(); // chatId -> { texto, ts }
 const TTL_MS = 10 * 60 * 1000; // 10 minutos
 
@@ -57,14 +51,28 @@ async function descargarFoto(fileId) {
   return { buffer: Buffer.from(resp.data), nombre };
 }
 
-async function reenviarPorMail({ asunto, cuerpo, adjuntos }) {
-  await transporter.sendMail({
-    from: GMAIL_USER,
-    to: DEST_EMAIL,
-    subject: asunto,
-    text: cuerpo,
-    attachments: adjuntos,
-  });
+async function reenviarPorMail({ asunto, cuerpo, nombreArchivo, buffer }) {
+  await axios.post(
+    'https://api.resend.com/emails',
+    {
+      from: RESEND_FROM,
+      to: [DEST_EMAIL],
+      subject: asunto,
+      text: cuerpo,
+      attachments: [
+        {
+          filename: nombreArchivo,
+          content: buffer.toString('base64'),
+        },
+      ],
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
 }
 
 // ── WEBHOOK ──
@@ -83,7 +91,6 @@ app.post('/webhook', async (req, res) => {
   try {
     // ── Mensaje con foto ──
     if (msg.photo && msg.photo.length > 0) {
-      // Telegram manda varias resoluciones; la última es la más grande.
       const fotoMasGrande = msg.photo[msg.photo.length - 1];
       const asunto = (msg.caption || tomarTextoDeRespaldo(chatId) || '').trim();
 
@@ -100,7 +107,8 @@ app.post('/webhook', async (req, res) => {
       await reenviarPorMail({
         asunto,
         cuerpo: `Foto recibida por Telegram.\nDescripción: ${asunto}`,
-        adjuntos: [{ filename: nombre, content: buffer }],
+        nombreArchivo: nombre,
+        buffer,
       });
 
       await enviarMensaje(chatId, `✅ Foto reenviada: <b>${asunto}</b>`);
@@ -114,7 +122,7 @@ app.post('/webhook', async (req, res) => {
       return;
     }
   } catch (err) {
-    console.error('Error procesando mensaje:', err);
+    console.error('Error procesando mensaje:', err.response ? err.response.data : err.message);
     await enviarMensaje(chatId, '⚠️ Hubo un error reenviando la foto. Probá de nuevo.');
   }
 });
